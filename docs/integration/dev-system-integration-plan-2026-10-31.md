@@ -4,6 +4,8 @@
 
 目标：把管理后台 MVP 从"自带一份客户端副本的独立项目"变成"我们开发体系里可发布、可运维的一条主线"——客户端用主开发仓 `UWork-frontend`，模型上游用 AIHub/new-api，企微沿用现有自建应用，流程沿用同一套 spec/门禁/发布。
 
+目标架构（客户端 → 服务端 → 模型接入 → 审计的完整口径）见 [UWork 端到端架构 V2](../architecture/uwork-end-to-end-architecture-v2-2026-10-31.md)；本文只管"怎么把现有资产接上去"。
+
 ## 0. 结论先行
 
 1. 后台本身是健康的：本机实测 `npm test` 312 项全通过、`tsc -p tsconfig.json`（src）通过、`npm run build` 通过（Node 24.22.2）。
