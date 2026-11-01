@@ -154,3 +154,87 @@ node scripts/port-client-adaptation.mjs --baseline /tmp/uwork-base-3.16.0 \
 4. 跨仓用例 `enterpriseCatalogSecurityIndependent` 需要 `UWORK_BACKEND_ROOT` 指向后台仓库才运行，否则跳过。
 5. UI 权限选择器的 `compact` 变体暂无调用方（主干面板走 Select）。
 6. 发布配置未切换：安装包仍注入 `backend` 缺省（=ucas），未指向自有后台。
+
+## 附录 D：本机端到端验证（2026-11-01）
+
+目标：后台跑在 Docker 里，客户端跑在开发态，两端按 `backend: "uwork"` 真实对接一次。
+
+### D.1 后台（Docker）
+
+```sh
+cd UWork-backend
+docker compose build
+mkdir -p data && chmod 700 data
+BOOTSTRAP_EMAIL=admin@uwork.local BOOTSTRAP_PASSWORD='…' BOOTSTRAP_ORGANIZATION='UWork 本地企业' \
+  docker compose run --rm --no-deps -e BOOTSTRAP_EMAIL -e BOOTSTRAP_PASSWORD -e BOOTSTRAP_ORGANIZATION \
+  backend node dist/cli.js init
+docker compose up -d
+```
+
+- **端口改到 3210**：本机 3000 被 `mcp-excalidraw-server` 占用，用 `compose.override.yaml`（已 gitignore）以 `ports: !override` 覆写；`.env` 的 `PUBLIC_URL` 同步改成 `http://localhost:3210`（必须与访问 origin 完全一致）。
+- 开发态 `.env`：`MASTER_KEY`(64 hex)、`ALLOW_PRIVATE_UPSTREAMS=true`（**仅本机开发**，生产保持 `false`）、`DATABASE_PATH=data/uwork.sqlite`。
+- 初始化凭据在 `data/bootstrap-credentials.txt`（0600），租户 ID 记在该文件里；初始化后 `curl /health` 返回 200。
+- 受控上游：`/tmp/uwork-e2e/mock-upstream.mjs`（OpenAI 兼容，`/v1/models` + `/v1/chat/completions` 的 JSON/SSE，监听 8791）。容器经 `host.docker.internal:8791` 访问它，所以模型的 `baseUrl` 写 `http://host.docker.internal:8791/v1`。
+
+模型配置（管理员会话）：`POST /api/tenants/{id}/credentials {name,value}` → `POST /api/tenants/{id}/models {name,upstreamModel:"mock-chat",baseUrl,credentialId,scope:{all:true},enabled:true}`。
+
+### D.2 后台链路（实测结果）
+
+| 步骤 | 结果 |
+| --- | --- |
+| `POST /api/auth/wecom` 未配置时 | 503（**按设计拒绝，不模拟扫码成功**） |
+| `POST /api/auth/login`（邮箱密码） | 200，拿到不透明会话；`/api/auth/me` 返回 owner/seat=true/tenant |
+| `POST /models/{id}/probe` | 200 `{reachable:true,modelsEndpoint:true}`（经容器访问受控上游） |
+| `GET /v1/models` | 200，返回该成员可见模型与能力位 |
+| `POST /v1/chat/completions`（JSON） | 200，正文 `E2E-OK …`，`usage 12/7` |
+| `POST /v1/chat/completions`（`stream:true`） | 3 帧 SSE + `[DONE]`，文本完整 |
+| `GET /api/client/usage` | 2 次请求、8 credits、38 tokens（按真实 usage 结算） |
+| `GET /api/tenants/{id}/usage` | 账本两条 `status:"settled"`，`amount:4`（预留 240 → 结算 4） |
+| 无令牌 `GET /v1/models` | 401 |
+| 未知模型 | 400 |
+
+### D.3 客户端链路（dev 桌面）
+
+启动配方（关键点都是踩过的坑）：
+
+```sh
+cd UWork-integration                      # 移植分支的 worktree
+export PATH=~/.cache/uwork-node24/node-v24.14.0-darwin-arm64/bin:$PATH   # 必须是 24.14.0：CUA helper SEA 会校验
+env HOME=/tmp/uwork-e2e/home \
+    ZCODE_DESKTOP_HOME_DIR=/tmp/uwork-e2e/home \
+    UWORK_DATA_BASE_DIR=/tmp/uwork-e2e/home ZCODE_DATA_BASE_DIR=/tmp/uwork-e2e/home \
+    ZCODE_ENV=production \
+    ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=<repo>/config/provider/zcode-builtin.json \
+    node scripts/dev-desktop-env.mjs production
+```
+
+- **必须同时隔离 `HOME`**：只改 `UWORK_DATA_BASE_DIR` 会触发"从默认数据根迁移"，而被用户正在运行的 CLI 进程占住 → `legacy_writer_active`，Host 起不来。
+- 数据根是 `<base>/.uwork`（不是 `<base>`），企业身份配置要放 `<base>/.uwork/v2/enterprise-identity.json`。
+- 不指定 `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` 时会加载 `zcode-builtin.test.json`（无 `ucas` 模板）→ `Provider Template 不存在: ucas`。
+
+客户端配置（本机覆盖）：
+
+```json
+{
+  "apiBaseUrl": "http://localhost:3210",
+  "backend": "uwork",
+  "callbackUrl": "http://localhost:3210/api/auth/wecom/callback",
+  "organizations": [{ "orgId": "<后台 tenantId>", "corpId": "ww-local-dev", "agentId": "1000001", "label": "UWork 本地企业" }],
+  "defaultOrgId": "<后台 tenantId>"
+}
+```
+
+为此修了一处不一致：配置 schema 只允许 HTTPS，而运行时 `uworkBackendSession` 允许回环 HTTP，导致本机后台根本配不上——现在 schema 与运行时同规则（**仅 `localhost/127.0.0.1/[::1]` 放行明文，非回环 HTTP 仍拒绝**），并补了正反用例（14/14 通过）。
+
+实测：Host 注册了 `enterprise-identity` 与 `ucas-gateway` 服务、`restoreSession`/`readClientPresentation` 正常；渲染进程出现「企业微信登录」入口；点击后请求打到后台 `/api/auth/wecom/attempts`，后台按设计返回 **503（该租户未配置企微应用）**，界面提示「登录未完成」。
+
+**结论**：客户端 ↔ 后台 ↔ 模型 ↔ 账本这条链在本机已经跑通；唯一未闭环的是**扫码登录本身**，它需要真实企微自建应用（corpId/agentId/Secret + 回调域），本机没有也不应伪造。要在本机点进登录后的界面，只能二选一：① 配一个真实企微应用（推荐，也顺带验证回调域）；② 由产品决策加一个**仅开发态**的合成登录端点（当前后台明确拒绝模拟扫码，未擅自添加）。
+
+### D.4 本机清理
+
+```sh
+pkill -f "UWork-integration/node_modules/.bin/(tsup|vite|concurrently)"; pkill -f "\.zcode-runtime/desktop-dev"
+cd UWork-backend && docker compose down            # 保留 data/ 与 .env
+pkill -f mock-upstream.mjs
+rm -rf /tmp/uwork-e2e                              # 隔离的客户端 HOME/数据根与受控上游脚本
+```
