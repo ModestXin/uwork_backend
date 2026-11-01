@@ -13,3 +13,4 @@ admin/dist/
 *.log
 __pycache__/
 *.py[cod]
+compose.override.yaml

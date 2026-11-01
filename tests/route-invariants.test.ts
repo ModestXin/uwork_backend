@@ -11,6 +11,8 @@ const publicPaths = [
   "/api/auth/wecom/attempts/:id/claim",
   "/api/auth/wecom/attempts/:id/cancel",
   "/api/auth/wecom/callback",
+  // 本机开发态合成授权页：不鉴权（就是"扫码页"），但只在回环 + 显式 env 下存在。
+  "/api/auth/wecom/dev-synthetic",
   "/api/openapi.json",
 ];
 /** 权限判定写在被调用服务内部的端点。 */

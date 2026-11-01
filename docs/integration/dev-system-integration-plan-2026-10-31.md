@@ -238,3 +238,23 @@ cd UWork-backend && docker compose down            # 保留 data/ 与 .env
 pkill -f mock-upstream.mjs
 rm -rf /tmp/uwork-e2e                              # 隔离的客户端 HOME/数据根与受控上游脚本
 ```
+
+### D.5 开发态合成登录（2026-11-01 追加）
+
+本机没有企微应用，扫码那一步无法真实完成。按"绕过企微、把整条链跑通"的要求，两侧各加了一处**只在回环地址生效**的开发态开关，真实链路与生产行为都不受影响：
+
+| 位置 | 改动 | 生效条件 |
+| --- | --- | --- |
+| 后台 `src/dev-login.ts` | 新增合成授权页与合成 code | `UWORK_DEV_SYNTHETIC_LOGIN=<成员邮箱>` **且** `PUBLIC_URL` 是 `localhost/127.0.0.1/[::1]`；**已配置企微应用的租户永远走真实扫码** |
+| 后台 `src/wecom.ts` | attempts 未配置企微时回落合成授权页；`GET /api/auth/wecom/dev-synthetic` 校验 state 与回调绑定后 302 到真实回调；换 code 阶段用邮箱解析本租户启用成员并绑定 `dev-synthetic:<邮箱>` 作为企微账号位 | 同上 |
+| 客户端 `uworkIdentityAdapter` | 回环控制面允许托管自己的授权页（state / redirect_uri 绑定仍校验）；合成授权时不下发 `callbackUrl`，界面走"外部浏览器 + 轮询"而不是挂起的扫码视图 | 控制面是回环 HTTP |
+| 客户端 `wecom-identity-config` / `enterprise-identity` schema | 回环地址允许明文 HTTP（与运行时 `uworkBackendSession` 同规则） | 仅回环 |
+| 客户端 `enterpriseToolAuthorizationBridge` | 工作区比较增加规范路径兜底（macOS `/tmp` → `/private/tmp` 这类符号链接） | 无开关，正面修复（任何符号链接工作区都受益） |
+
+实测（同一台机器，客户端 dev 桌面 + Docker 后台 + 受控上游）：
+
+1. 界面点「企业微信登录」→ 外部浏览器打开合成授权页 → 302 到回调 → 客户端轮询 claim → `Enterprise session authenticated`，侧栏显示「UWork 本地企业」。
+2. 引导完成后主界面出现，模型下拉已是后台下发的 `Mock E2E`。
+3. 在输入框发一条消息 → 回复 `E2E-OK <ISO 时间>`（受控上游正文）→ 后台账本新增 `settled`：`amount=4`、`input_tokens=12`、`output_tokens=7`，`/api/client/usage` 从 2 次请求涨到 4 次、16 credits。
+
+风险与边界：开关不看主机名白名单、只看回环 + 显式 env，且**不覆盖已配置企微的租户**；生产 `PUBLIC_URL` 必须是 HTTPS（后台配置已强制），因此该路径在生产不可达。新增测试：后台 3 项（未开开关/非回环仍 503、合成全流程、已配置企微仍用官方授权域），客户端 4 项（合成授权接受与拒绝、官方授权保持原生回调、符号链接工作区判定）。

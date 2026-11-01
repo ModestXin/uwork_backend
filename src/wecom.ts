@@ -13,6 +13,13 @@ import {
 import { audit } from "./events.js";
 import { fail, hash, id, now, secret, text } from "./core.js";
 import { readJson, safeRequest } from "./network.js";
+import {
+  SYNTHETIC_AUTHORIZE_PATH,
+  SYNTHETIC_CODE,
+  resolveSyntheticMember,
+  syntheticAuthorizeUrl,
+  syntheticLogin,
+} from "./dev-login.js";
 
 interface EnterpriseAuth {
   tenant_id: string;
@@ -211,7 +218,14 @@ export function wecomRoutes(
   app.post("/api/auth/wecom/attempts", async (req, reply) => {
     rateLimit(db, `wecom:${req.ip}`, 30);
     const { tenantId } = z.object({ tenantId: text }).strict().parse(req.body);
-    const c = configuration(tenantId);
+    const configured = db.get<EnterpriseAuth>(
+      "SELECT * FROM enterprise_auth WHERE tenant_id=?",
+      tenantId,
+    );
+    // 已配置企微的租户永远走真实扫码；只有未配置 + 回环开发态才回落合成登录。
+    const devSynthetic = configured ? undefined : syntheticLogin(publicUrl);
+    if (!configured && !devSynthetic)
+      fail(503, "WECOM_NOT_CONFIGURED", "组织尚未配置企业微信应用");
     const attemptId = id(),
       proof = secret(),
       state = attemptId;
@@ -224,23 +238,49 @@ export function wecomRoutes(
       "pending",
       now() + 5 * 60000,
     );
-    const url = new URL("https://login.work.weixin.qq.com/wwlogin/sso/login");
-    for (const [k, v] of Object.entries({
-      appid: c.corp_id,
-      agentid: c.agent_id,
-      redirect_uri: `${publicUrl}/api/auth/wecom/callback`,
-      state,
-      login_type: "CorpApp",
-      lang: "zh",
-    }))
-      url.searchParams.set(k, v);
+    let authorizeUrl: string;
+    if (configured) {
+      const url = new URL("https://login.work.weixin.qq.com/wwlogin/sso/login");
+      for (const [k, v] of Object.entries({
+        appid: configured.corp_id,
+        agentid: configured.agent_id,
+        redirect_uri: `${publicUrl}/api/auth/wecom/callback`,
+        state,
+        login_type: "CorpApp",
+        lang: "zh",
+      }))
+        url.searchParams.set(k, v);
+      authorizeUrl = url.toString();
+    } else {
+      // 合成授权页就在本机后台，真正换 code 的那一步被替换，其余流程不变。
+      authorizeUrl = syntheticAuthorizeUrl(publicUrl, state);
+    }
     reply.code(201);
     return {
       id: attemptId,
       proof,
       expiresAt: now() + 5 * 60000,
-      authorizeUrl: url.toString(),
+      authorizeUrl,
     };
+  });
+  app.get("/api/auth/wecom/dev-synthetic", async (req, reply) => {
+    if (!syntheticLogin(publicUrl)) fail(404, "NOT_FOUND", "请求无法处理");
+    const query = z
+      .object({ state: z.string().min(1).max(200), redirect_uri: z.string().max(2048) })
+      .strict()
+      .parse(req.query);
+    if (query.redirect_uri !== `${publicUrl}/api/auth/wecom/callback`)
+      fail(400, "INVALID_REDIRECT", "授权回调地址不匹配");
+    const attempt = db.get<{ id: string }>(
+      "SELECT id FROM login_attempts WHERE state_hash=? AND status='pending' AND expires_at>?",
+      hash(query.state),
+      now(),
+    );
+    if (!attempt) fail(400, "INVALID_STATE", "扫码尝试已过期或已使用");
+    const target = new URL(query.redirect_uri);
+    target.searchParams.set("state", query.state);
+    target.searchParams.set("code", SYNTHETIC_CODE);
+    return reply.redirect(target.toString());
   });
   const verifyAttempt = async (query: { state: string; code: string }) => {
     const attempt = db.get<{ id: string; tenant_id: string }>(
@@ -254,17 +294,27 @@ export function wecomRoutes(
       attempt.id,
     );
     try {
-      const c = configuration(attempt.tenant_id);
-      const externalId = await provider.identity(
-        c,
-        vault.read(c.tenant_id, c.credential_id),
-        query.code,
-      );
-      const member = db.get<{ user_id: string }>(
-        "SELECT user_id FROM members WHERE tenant_id=? AND external_id=? AND status='active'",
-        c.tenant_id,
-        externalId,
-      );
+      const devSynthetic =
+        query.code === SYNTHETIC_CODE ? syntheticLogin(publicUrl) : undefined;
+      let member: { user_id: string } | undefined;
+      let tenantId = attempt.tenant_id;
+      if (devSynthetic) {
+        const userId = resolveSyntheticMember(db, attempt.tenant_id, devSynthetic.email);
+        if (userId) member = { user_id: userId };
+      } else {
+        const c = configuration(attempt.tenant_id);
+        tenantId = c.tenant_id;
+        const externalId = await provider.identity(
+          c,
+          vault.read(c.tenant_id, c.credential_id),
+          query.code,
+        );
+        member = db.get<{ user_id: string }>(
+          "SELECT user_id FROM members WHERE tenant_id=? AND external_id=? AND status='active'",
+          c.tenant_id,
+          externalId,
+        );
+      }
       if (!member)
         fail(403, "MEMBER_UNMAPPED", "成员尚未同步或绑定，请联系管理员");
       if (
@@ -278,7 +328,7 @@ export function wecomRoutes(
         fail(409, "ATTEMPT_USED", "扫码尝试已取消或过期");
       audit(
         db,
-        { tenantId: c.tenant_id, userId: member.user_id },
+        { tenantId, userId: member.user_id },
         "wecom.authorized",
       );
     } catch (error) {
