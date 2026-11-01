@@ -122,3 +122,35 @@ node scripts/port-client-adaptation.mjs --baseline /tmp/uwork-base-3.16.0 \
 | `npm run typecheck` | 失败：`scripts/*-smoke.ts` 静态引用未安装依赖的 `clients/uwork`（既有缺口，非本次改动） |
 | `npm run build`（tsc + vite admin） | 通过 |
 | `node scripts/port-client-adaptation.mjs`（干跑） | added 345 / clean-merge 144 / conflict 95 / collision 1 / absent 4 |
+
+## 附录 C：执行结果（2026-11-01）
+
+落点：`UWork-frontend` 独立 worktree `UWork-integration`，分支 `feat/uwork-backend-integration`（起点 `f368d7e4` / v0.1.5）。**未改主工作树**。
+
+移植：`node scripts/port-client-adaptation.mjs --apply` 自动落盘 345 个新增与 144 个干净合并；94 个冲突文件全部解决（CLI / desktop / UI / services 其余四个区域由并行代理按「主干权威 + 保留企业能力」口径处理，`ucasGatewayService.ts`、`node.ts`、CLI `subagent/profile.ts` 与服务层核心由人工合并）。
+
+门禁（全部在本机实跑）：
+
+| 门禁 | 结果 |
+| --- | --- |
+| `pnpm typecheck` | **0 错误**（含 desktop main/host/e2e/remote-main 与 zcode-cua） |
+| `pnpm lint`（oxlint） | **0 错误**（339 警告为仓库存量） |
+| `pnpm architecture:check --changed` | **0 违规** |
+| `pnpm test:enterprise-policy` | **229 + 320 全绿**（core 229、services 含 gateway 320） |
+
+关键合并口径（后续改这些文件前先读）：
+
+1. **网关服务**：采用适配版结构（`ucas`/`uwork` 双后端 + 投影准入 + 目录生命周期），把主干的身份写入闸门以 `gatewayWriteAdmission.ts` 的形式补回（`withCurrentSession` 锁内提交，换账号后的迟到写入被拒）；选项同时接受 `readIdentitySession` 与主干的 `identitySessionStore`，**缺省 backend 仍是 `ucas`**。
+2. **客户端配置**：保留主干 `/api/v1/client/configs` 抓取与缓存，托管时叠加企业已发布的插件商店排序（读取失败不影响公开配置）。
+3. **Agent profile**：`AgentProfileSource` 增加 `enterprise`、`AgentProfile` 增加 `exactSelection`（shared 类型 + schema），个人别名前缀与名称规范化落在 CLI `subagent/profile.ts`。
+4. **会话分享**：`scopeConversationShareLocalFiles` 改为泛型透传，保住主干的工作流快照端口与适配版的企业发布许可。
+5. **轮终态相位**：模型循环未启动就失败/取消时报告创建期相位（`presentation_preferences`/`model_creation`），进入循环后仍用状态机相位。
+
+已知遗留（下一批，按优先级）：
+
+1. 桌面 Host 连接路径仍是主干实现（source-server 租约/重连）；适配版的 `createRemoteWorkspaceServiceCollection` + cached dispose 未嫁接，相关用例 `remoteWorkspaceServiceLifecycle` 6 项仍红。
+2. `rendererActionTraceIpc` 实现改为呈现驱动后，其主干测试仍按 rollout 断言，需同步。
+3. 架构例外：103 个移植文件按 `uwork-backend-client-adaptation-port` 例外登记——**依赖方向、环检测目前不覆盖这些文件**，P1 需按模块（身份/网关/资产/呈现/CLI 准入）收敛后再删例外。
+4. 跨仓用例 `enterpriseCatalogSecurityIndependent` 需要 `UWORK_BACKEND_ROOT` 指向后台仓库才运行，否则跳过。
+5. UI 权限选择器的 `compact` 变体暂无调用方（主干面板走 Select）。
+6. 发布配置未切换：安装包仍注入 `backend` 缺省（=ucas），未指向自有后台。
