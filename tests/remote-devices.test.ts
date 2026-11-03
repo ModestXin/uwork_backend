@@ -15,6 +15,7 @@ async function fixture(
   options: {
     verifyExternalToken?: (token: string) => Promise<{ wecomUserId: string; orgId: string } | null>;
     bindExternalId?: string;
+    extraAllowedOrigins?: string[];
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "uwork-remote-devices-"));
@@ -24,6 +25,7 @@ async function fixture(
     publicUrl: "http://localhost:3000",
     worker: false,
     ...(options.verifyExternalToken ? { verifyExternalToken: options.verifyExternalToken } : {}),
+    ...(options.extraAllowedOrigins ? { extraAllowedOrigins: options.extraAllowedOrigins } : {}),
   });
   t.after(async () => {
     await app.close();
@@ -229,4 +231,39 @@ test("an unknown pivot token or an unmapped member is refused", async (t) => {
     payload: body({ deviceMid: "mid-1" }),
   });
   assert.equal(unmapped.statusCode, 403);
+});
+
+test("手机页与后台不同源时，只有显式配置的来源能在远控接口上写", async (t) => {
+  const f = await fixture(t, {
+    bindExternalId: "xiaohua.xin",
+    verifyExternalToken: async (token) =>
+      token === "pivot-token" ? { wecomUserId: "xiaohua.xin", orgId: "pivot-org" } : null,
+    extraAllowedOrigins: ["https://pivot.ucas.com.cn:23090"],
+  });
+  const fromPage = await f.app.inject({
+    method: "PUT",
+    url: `/api/client/remote-devices/${SID}`,
+    headers: {
+      authorization: "Bearer pivot-token",
+      origin: "https://pivot.ucas.com.cn:23090",
+      "content-type": "application/json",
+    },
+    payload: body({ deviceMid: "mid-1" }),
+  });
+  assert.equal(fromPage.statusCode, 200);
+  const foreign = await f.app.inject({
+    method: "PUT",
+    url: `/api/client/remote-devices/${SID}`,
+    headers: {
+      authorization: "Bearer pivot-token",
+      origin: "https://evil.example.test",
+      "content-type": "application/json",
+    },
+    payload: body({ deviceMid: "mid-1" }),
+  });
+  assert.equal(foreign.statusCode, 403);
+  assert.equal(
+    (foreign.json() as { error: { code: string } }).error.code,
+    "ORIGIN_REJECTED",
+  );
 });

@@ -60,6 +60,11 @@ export function environment() {
       PIVOT_API_HOST: z.string().max(256).default(""),
       /** 手机页登录要用的 pivot 公开地址（页面从这里走多余组织的企微授权）。 */
       PIVOT_PUBLIC_URL: z.string().max(2048).default(""),
+      /**
+       * 额外的允许来源（逗号分隔的 origin）：手机页与后台不同源时（例如页面挂在 pivot 上、
+       * 接口经代理回到这里），浏览器会带该 Origin；只放行这些显式配置的来源。
+       */
+      EXTRA_ALLOWED_ORIGINS: z.string().max(2048).default(""),
       SANDBOX_DOCKER_SOCKET: z.string().max(512).optional(),
       SANDBOX_IMAGE: z.string().max(256).default("uwork-sandbox:local"),
     })
@@ -83,6 +88,9 @@ export function environment() {
     pivotApiUrl: env.PIVOT_API_URL.trim(),
     pivotApiHost: env.PIVOT_API_HOST.trim(),
     pivotPublicUrl: env.PIVOT_PUBLIC_URL.trim(),
+    extraAllowedOrigins: env.EXTRA_ALLOWED_ORIGINS.split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
     sandboxSocket: env.SANDBOX_DOCKER_SOCKET,
     sandboxImage: env.SANDBOX_IMAGE,
   };

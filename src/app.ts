@@ -52,6 +52,8 @@ export interface AppOptions {
   verifyExternalToken?: (token: string) => Promise<{ wecomUserId: string; orgId: string } | null>;
   /** 手机页登录用的 pivot 公开地址；留空则手机页继续用本后台自己的企微应用。 */
   pivotPublicUrl?: string;
+  /** 额外的允许来源（手机页与后台不同源时浏览器带来的 Origin）。 */
+  extraAllowedOrigins?: string[];
 }
 export async function createApp(options: AppOptions) {
   if (options.masterKey.length !== 32)
@@ -194,7 +196,11 @@ export async function createApp(options: AppOptions) {
       reply.header("strict-transport-security", "max-age=31536000");
     if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
       const origin = req.headers.origin;
-      if (origin && origin !== new URL(options.publicUrl).origin)
+      const allowedOrigins = new Set([
+        new URL(options.publicUrl).origin,
+        ...(options.extraAllowedOrigins ?? []),
+      ]);
+      if (origin && !allowedOrigins.has(origin))
         fail(403, "ORIGIN_REJECTED", "请求来源不允许");
       if (
         req.headers.cookie?.includes("uwork_session=") &&

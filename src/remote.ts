@@ -46,7 +46,9 @@ const DEVICE_DEFAULT_TTL_SECONDS = 120;
 const DEVICE_MAX_TTL_SECONDS = 600;
 const PAIRING_TTL_MS = 60_000;
 const PAIRING_WAIT_MAX_SECONDS = 30;
-const HASH_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+// 桌面的 pass_hash 是 sha256 的 base64（含 + / =），这里只做长度与字符集兜底；
+// 材料不落库、只透传给手机，校验仍在 relay 的 HMAC 里。
+const HASH_PATTERN = /^[A-Za-z0-9_+/=-]{16,128}$/;
 
 /**
  * 会话已由各端点内的 authenticate + requirePermission 判定；这里只补本功能额外的两条：

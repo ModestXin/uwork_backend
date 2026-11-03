@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -192,4 +193,29 @@ test("the hash shape is validated before it is handed to the phone", async (t) =
     });
     assert.equal(answer.statusCode, 400);
   }
+});
+
+test("accepts the desktop's base64 pass hash (sha256 digest, not base64url)", async (t) => {
+  const f = await fixture(t);
+  const hash = createHash("sha256").update("password").digest("base64"); // 含 + / = 的真实形态
+  const pairing = await f.app.inject({
+    method: "POST",
+    url: `/api/client/remote-devices/${SID}/pairings`,
+    headers: auth(f.ownerToken),
+  });
+  assert.equal(pairing.statusCode, 201);
+  const pairingId = (pairing.json() as { id: string }).id;
+  const answered = await f.app.inject({
+    method: "POST",
+    url: `/api/client/remote-pairings/${pairingId}/answer`,
+    headers: { ...auth(f.ownerToken), "content-type": "application/json" },
+    payload: JSON.stringify({ sid: SID, hash }),
+  });
+  assert.equal(answered.statusCode, 200);
+  const material = await f.app.inject({
+    method: "GET",
+    url: `/api/client/remote-devices/${SID}/pairings/${pairingId}`,
+    headers: auth(f.ownerToken),
+  });
+  assert.equal((material.json() as { pairing: { hash: string } }).pairing.hash, hash);
 });
