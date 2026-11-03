@@ -5,6 +5,7 @@ import type { Db } from "./db.js";
 import { authenticate, requirePermission } from "./access.js";
 import { fail, id, now, text, type Actor } from "./core.js";
 import { ipAllowed } from "./policy.js";
+import type { RemoteExternalIdentity } from "./pivot-auth.js";
 
 /**
  * 手机远控的免扫码通路（企微内置浏览器从工作台进入）。
@@ -56,9 +57,80 @@ function assertRemoteAccess(db: Db, a: Actor, ip: string) {
   if (!ipAllowed(db, a, ip)) fail(403, "IP_DENIED", "企业 IP 白名单拒绝访问");
 }
 
-export function remoteRoutes(app: FastifyInstance, db: Db, publicUrl: string) {
+/** 允许携带外部（pivot）令牌访问的路径；其余 /api/client/* 仍只认本后台会话。 */
+const EXTERNAL_TOKEN_PATHS = ["/api/client/remote-devices", "/api/client/remote-pairings"] as const;
+
+export function isRemoteExternalPath(path: string): boolean {
+  return EXTERNAL_TOKEN_PATHS.some(
+    (allowed) => path === allowed || path.startsWith(`${allowed}/`),
+  );
+}
+
+export interface RemoteRoutesOptions {
+  publicUrl: string;
+  /** host → tenantId（与企微入口同一套组织解析）。 */
+  tenantHosts?: Record<string, string>;
+  /**
+   * 桌面令牌内省：UWork 登录在 pivot，桌面不带本后台会话。
+   * 返回 null 表示无效；未配置时不接受任何外部令牌。
+   */
+  verifyExternalToken?: (token: string) => Promise<RemoteExternalIdentity | null>;
+}
+
+export function remoteRoutes(app: FastifyInstance, db: Db, options: RemoteRoutesOptions) {
+  const publicUrl = options.publicUrl;
+  const tenantHosts = options.tenantHosts ?? {};
+  const verifyExternalToken = options.verifyExternalToken;
+
+  /** 外部身份 → 本后台成员（按企微 UserId）；解析不出就拒绝。 */
+  const pivotActor = async (
+    req: { headers: Record<string, unknown> },
+  ): Promise<Actor> => {
+    const header = req.headers["authorization"];
+    const token =
+      typeof header === "string" && header.toLowerCase().startsWith("bearer ")
+        ? header.slice(7).trim()
+        : "";
+    const external = token && verifyExternalToken ? await verifyExternalToken(token) : null;
+    if (!external) fail(401, "UNAUTHORIZED", "会话失效");
+    const tenantId = externalTenantId(db, req.headers["host"] as string | undefined, tenantHosts);
+    const member = tenantId
+      ? db.get<{ user_id: string; seat: number }>(
+          "SELECT user_id,seat FROM members WHERE tenant_id=? AND external_id=? AND status='active'",
+          tenantId,
+          external.wecomUserId,
+        )
+      : undefined;
+    if (!member) fail(403, "MEMBER_UNMAPPED", "成员尚未同步或未分配席位");
+    if (!member.seat) fail(403, "NO_SEAT", "未分配席位");
+    return {
+      userId: member.user_id,
+      tenantId: tenantId!,
+      role: "member",
+      departmentId: null,
+      seat: true,
+      sessionHash: "",
+      kind: "device",
+      scopes: [],
+    };
+  };
   // 应答材料只在内存里存在一个配对周期，不写库。
   const answers = new Map<string, PairingAnswer>();
+
+  /** 外部身份映射到哪个租户：先按请求 Host，其次唯一租户。 */
+  function externalTenantId(
+    db: Db,
+    host: string | undefined,
+    hosts: Record<string, string>,
+  ): string | undefined {
+    const normalized = host?.trim().toLowerCase();
+    if (normalized) {
+      const mapped = hosts[normalized] ?? hosts[normalized.split(":")[0]!];
+      if (mapped && db.get("SELECT id FROM tenants WHERE id=?", mapped)) return mapped;
+    }
+    const tenants = db.all<{ id: string }>("SELECT id FROM tenants ORDER BY created_at");
+    return tenants.length === 1 ? tenants[0]!.id : undefined;
+  }
 
   const sweep = () => {
     const at = now();
@@ -95,8 +167,15 @@ export function remoteRoutes(app: FastifyInstance, db: Db, publicUrl: string) {
   };
 
   app.put("/api/client/remote-devices/:sid", async (req) => {
-    const a = authenticate(db, req);
-    requirePermission(a, "execute");
+    let a: Actor;
+    try {
+      a = authenticate(db, req);
+      requirePermission(a, "execute");
+    } catch (error) {
+      // 桌面登录在 pivot：令牌不属于本后台时回落内省（手机侧仍走本后台会话）。
+      if (!verifyExternalToken) throw error;
+      a = await pivotActor(req);
+    }
     assertRemoteAccess(db, a, req.ip);
     const { sid } = req.params as { sid: string };
     if (!/^[A-Za-z0-9_-]{8,128}$/.test(sid)) fail(400, "BAD_REQUEST", "设备标识不合法");
@@ -140,8 +219,15 @@ export function remoteRoutes(app: FastifyInstance, db: Db, publicUrl: string) {
   });
 
   app.delete("/api/client/remote-devices/:sid", async (req) => {
-    const a = authenticate(db, req);
-    requirePermission(a, "execute");
+    let a: Actor;
+    try {
+      a = authenticate(db, req);
+      requirePermission(a, "execute");
+    } catch (error) {
+      // 桌面登录在 pivot：令牌不属于本后台时回落内省（手机侧仍走本后台会话）。
+      if (!verifyExternalToken) throw error;
+      a = await pivotActor(req);
+    }
     assertRemoteAccess(db, a, req.ip);
     const { sid } = req.params as { sid: string };
     db.run(
@@ -161,8 +247,15 @@ export function remoteRoutes(app: FastifyInstance, db: Db, publicUrl: string) {
   });
 
   app.get("/api/client/remote-devices", async (req) => {
-    const a = authenticate(db, req);
-    requirePermission(a, "execute");
+    let a: Actor;
+    try {
+      a = authenticate(db, req);
+      requirePermission(a, "execute");
+    } catch (error) {
+      // 桌面登录在 pivot：令牌不属于本后台时回落内省（手机侧仍走本后台会话）。
+      if (!verifyExternalToken) throw error;
+      a = await pivotActor(req);
+    }
     assertRemoteAccess(db, a, req.ip);
     sweep();
     return {
@@ -185,8 +278,15 @@ export function remoteRoutes(app: FastifyInstance, db: Db, publicUrl: string) {
   });
 
   app.post("/api/client/remote-devices/:sid/pairings", async (req, reply) => {
-    const a = authenticate(db, req);
-    requirePermission(a, "execute");
+    let a: Actor;
+    try {
+      a = authenticate(db, req);
+      requirePermission(a, "execute");
+    } catch (error) {
+      // 桌面登录在 pivot：令牌不属于本后台时回落内省（手机侧仍走本后台会话）。
+      if (!verifyExternalToken) throw error;
+      a = await pivotActor(req);
+    }
     assertRemoteAccess(db, a, req.ip);
     const { sid } = req.params as { sid: string };
     ownedDevice(a, sid);
@@ -216,8 +316,15 @@ export function remoteRoutes(app: FastifyInstance, db: Db, publicUrl: string) {
   });
 
   app.get("/api/client/remote-devices/:sid/pairings/:id", async (req) => {
-    const a = authenticate(db, req);
-    requirePermission(a, "execute");
+    let a: Actor;
+    try {
+      a = authenticate(db, req);
+      requirePermission(a, "execute");
+    } catch (error) {
+      // 桌面登录在 pivot：令牌不属于本后台时回落内省（手机侧仍走本后台会话）。
+      if (!verifyExternalToken) throw error;
+      a = await pivotActor(req);
+    }
     assertRemoteAccess(db, a, req.ip);
     const { sid, id: pairingId } = req.params as { sid: string; id: string };
     const pairing = ownedPairing(a, pairingId);
@@ -251,8 +358,15 @@ export function remoteRoutes(app: FastifyInstance, db: Db, publicUrl: string) {
   });
 
   app.get("/api/client/remote-pairings/next", async (req) => {
-    const a = authenticate(db, req);
-    requirePermission(a, "execute");
+    let a: Actor;
+    try {
+      a = authenticate(db, req);
+      requirePermission(a, "execute");
+    } catch (error) {
+      // 桌面登录在 pivot：令牌不属于本后台时回落内省（手机侧仍走本后台会话）。
+      if (!verifyExternalToken) throw error;
+      a = await pivotActor(req);
+    }
     assertRemoteAccess(db, a, req.ip);
     const query = z
       .object({
@@ -285,8 +399,15 @@ export function remoteRoutes(app: FastifyInstance, db: Db, publicUrl: string) {
   });
 
   app.post("/api/client/remote-pairings/:id/answer", async (req) => {
-    const a = authenticate(db, req);
-    requirePermission(a, "execute");
+    let a: Actor;
+    try {
+      a = authenticate(db, req);
+      requirePermission(a, "execute");
+    } catch (error) {
+      // 桌面登录在 pivot：令牌不属于本后台时回落内省（手机侧仍走本后台会话）。
+      if (!verifyExternalToken) throw error;
+      a = await pivotActor(req);
+    }
     assertRemoteAccess(db, a, req.ip);
     const { id: pairingId } = req.params as { id: string };
     // 组织绑定由本处理器完成：配对请求必须属于当前会话的 tenant + member。

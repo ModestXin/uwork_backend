@@ -12,7 +12,7 @@ import { Gateway, gatewayRoutes } from "./gateway.js";
 import { assetRoutes } from "./assets.js";
 import { policyRoutes, ipAllowed } from "./policy.js";
 import { clientRoutes } from "./client.js";
-import { remoteRoutes } from "./remote.js";
+import { isRemoteExternalPath, remoteRoutes } from "./remote.js";
 import { sharingRoutes, purgeExpiredShares } from "./sharing.js";
 import { sharingViewerRoutes } from "./sharing-viewer.js";
 import { clientConsoleRoutes } from "./client-console.js";
@@ -48,6 +48,8 @@ export interface AppOptions {
   sandboxImage?: string;
   /** host → tenantId（同源入口自动解析组织；缺省读环境变量）。 */
   tenantHosts?: Record<string, string>;
+  /** 桌面令牌（pivot 签发）内省；缺省由启动层按 PIVOT_API_URL 构造。 */
+  verifyExternalToken?: (token: string) => Promise<{ wecomUserId: string; orgId: string } | null>;
 }
 export async function createApp(options: AppOptions) {
   if (options.masterKey.length !== 32)
@@ -203,9 +205,15 @@ export async function createApp(options: AppOptions) {
     const tenantId = /^\/api\/tenants\/([^/]+)/.exec(path)?.[1];
     if (tenantId) tenantAccess(authenticate(db, req), tenantId);
     if (path.startsWith("/api/client/") || path.startsWith("/v1/")) {
-      const a = authenticate(db, req);
-      if (!ipAllowed(db, a, req.ip))
-        fail(403, "IP_DENIED", "企业 IP 白名单拒绝访问");
+      try {
+        const a = authenticate(db, req);
+        if (!ipAllowed(db, a, req.ip))
+          fail(403, "IP_DENIED", "企业 IP 白名单拒绝访问");
+      } catch (error) {
+        // 远控设备/配对接口：桌面登录在 pivot、不带本后台会话，令牌由处理器内省后判定
+        // （仍做席位与 IP 白名单）；其余路径照旧必须带本后台会话。
+        if (!(options.verifyExternalToken && isRemoteExternalPath(path))) throw error;
+      }
     }
   });
   app.setErrorHandler((error, req, reply) => {
@@ -267,7 +275,11 @@ export async function createApp(options: AppOptions) {
   assetRoutes(app, db);
   policyRoutes(app, db);
   clientRoutes(app, db);
-  remoteRoutes(app, db, options.publicUrl);
+  remoteRoutes(app, db, {
+    publicUrl: options.publicUrl,
+    tenantHosts: options.tenantHosts ?? {},
+    ...(options.verifyExternalToken ? { verifyExternalToken: options.verifyExternalToken } : {}),
+  });
   sharingRoutes(app, db, options.publicUrl);
   sharingViewerRoutes(app, db);
   purgeExpiredShares(db);

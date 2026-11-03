@@ -1,7 +1,20 @@
 import { createApp } from "./app.js";
 import { environment } from "./config.js";
+import { createPivotTokenVerifier } from "./pivot-auth.js";
 const config = environment();
-const app = await createApp({ ...config, logger: true, worker: true });
+const app = await createApp({
+  ...config,
+  logger: true,
+  worker: true,
+  ...(config.pivotApiUrl
+    ? {
+        verifyExternalToken: createPivotTokenVerifier({
+          baseUrl: config.pivotApiUrl,
+          host: config.pivotApiHost || new URL(config.pivotApiUrl).host,
+        }),
+      }
+    : {}),
+});
 let closing: Promise<void> | undefined;
 const shutdown = () => {
   closing ??= app

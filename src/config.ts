@@ -54,6 +54,10 @@ export function environment() {
        * 形如 `uwork.ucas.com.cn=<id>,localhost:3210=<id>`；用于同源入口自动解析租户。
        */
       TENANT_HOSTS: z.string().max(4096).default(""),
+      /** pivot 控制面内省入口（桌面令牌验证用）；留空则桌面令牌一律拒绝。 */
+      PIVOT_API_URL: z.string().max(2048).default(""),
+      /** 该入口要带的 Host（pivot 按 Host 路由组织）。 */
+      PIVOT_API_HOST: z.string().max(256).default(""),
       SANDBOX_DOCKER_SOCKET: z.string().max(512).optional(),
       SANDBOX_IMAGE: z.string().max(256).default("uwork-sandbox:local"),
     })
@@ -74,6 +78,8 @@ export function environment() {
     allowPrivateUpstreams: env.ALLOW_PRIVATE_UPSTREAMS === "true",
     privateModelOrigins: env.PRIVATE_MODEL_ORIGINS,
     tenantHosts: parseTenantHosts(env.TENANT_HOSTS),
+    pivotApiUrl: env.PIVOT_API_URL.trim(),
+    pivotApiHost: env.PIVOT_API_HOST.trim(),
     sandboxSocket: env.SANDBOX_DOCKER_SOCKET,
     sandboxImage: env.SANDBOX_IMAGE,
   };

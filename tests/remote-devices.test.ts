@@ -10,13 +10,20 @@ import { bootstrap, issueSession } from "../src/identity.js";
 
 const SID = "device-sid-fixture-0001";
 
-async function fixture(t: TestContext) {
+async function fixture(
+  t: TestContext,
+  options: {
+    verifyExternalToken?: (token: string) => Promise<{ wecomUserId: string; orgId: string } | null>;
+    bindExternalId?: string;
+  } = {},
+) {
   const directory = await mkdtemp(join(tmpdir(), "uwork-remote-devices-"));
   const app = await createApp({
     database: join(directory, "remote.sqlite"),
     masterKey: randomBytes(32),
     publicUrl: "http://localhost:3000",
     worker: false,
+    ...(options.verifyExternalToken ? { verifyExternalToken: options.verifyExternalToken } : {}),
   });
   t.after(async () => {
     await app.close();
@@ -45,6 +52,13 @@ async function fixture(t: TestContext) {
     );
     return { userId, token: issueSession(app.services.db, userId, owner.tenantId).token };
   });
+  if (options.bindExternalId)
+    app.services.db.run(
+      "UPDATE members SET external_id=? WHERE tenant_id=? AND user_id=?",
+      options.bindExternalId,
+      owner.tenantId,
+      owner.userId,
+    );
   const ownerToken = issueSession(app.services.db, owner.userId, owner.tenantId).token;
   return { app, owner, ownerToken, other };
 }
@@ -149,4 +163,70 @@ test("device endpoints require a session and reject unknown fields", async (t) =
     payload: body({ deviceMid: "mid-1", hash: "should-not-be-accepted" }),
   });
   assert.equal(extra.statusCode, 400);
+});
+
+test("a desktop signed in through pivot (no backend session) is mapped by WeCom user id", async (t) => {
+  const f = await fixture(t, {
+    bindExternalId: "xiaohua.xin",
+    verifyExternalToken: async (token) =>
+      token === "pivot-token" ? { wecomUserId: "xiaohua.xin", orgId: "pivot-org" } : null,
+  });
+  // 桌面只带 pivot 令牌，没有本后台会话。
+  const registered = await f.app.inject({
+    method: "PUT",
+    url: `/api/client/remote-devices/${SID}`,
+    headers: { authorization: "Bearer pivot-token", "content-type": "application/json" },
+    payload: body({ deviceMid: "mid-desktop", name: "桌面（pivot 登录）", platform: "darwin" }),
+  });
+  assert.equal(registered.statusCode, 200);
+  // 手机（本后台会话，同一企微身份）能看到它，并完成配对。
+  const listed = await f.app.inject({
+    method: "GET",
+    url: "/api/client/remote-devices",
+    headers: auth(f.ownerToken),
+  });
+  assert.equal((listed.json() as { devices: Array<{ name?: string }> }).devices[0]?.name, "桌面（pivot 登录）");
+  const pairing = await f.app.inject({
+    method: "POST",
+    url: `/api/client/remote-devices/${SID}/pairings`,
+    headers: auth(f.ownerToken),
+  });
+  assert.equal(pairing.statusCode, 201);
+  const pairingId = (pairing.json() as { id: string }).id;
+  const next = await f.app.inject({
+    method: "GET",
+    url: `/api/client/remote-pairings/next?deviceSid=${SID}&wait=0`,
+    headers: { authorization: "Bearer pivot-token" },
+  });
+  assert.equal(next.statusCode, 200);
+  assert.equal((next.json() as { pairing: { id: string } | null }).pairing?.id, pairingId);
+  const answered = await f.app.inject({
+    method: "POST",
+    url: `/api/client/remote-pairings/${pairingId}/answer`,
+    headers: { authorization: "Bearer pivot-token", "content-type": "application/json" },
+    payload: JSON.stringify({ sid: SID, hash: "pairing-hash-fixture-0001" }),
+  });
+  assert.equal(answered.statusCode, 200);
+});
+
+test("an unknown pivot token or an unmapped member is refused", async (t) => {
+  const f = await fixture(t, {
+    bindExternalId: "xiaohua.xin",
+    verifyExternalToken: async (token) =>
+      token === "pivot-token" ? { wecomUserId: "someone.else", orgId: "pivot-org" } : null,
+  });
+  const badToken = await f.app.inject({
+    method: "PUT",
+    url: `/api/client/remote-devices/${SID}`,
+    headers: { authorization: "Bearer nope", "content-type": "application/json" },
+    payload: body({ deviceMid: "mid-1" }),
+  });
+  assert.equal(badToken.statusCode, 401);
+  const unmapped = await f.app.inject({
+    method: "PUT",
+    url: `/api/client/remote-devices/${SID}`,
+    headers: { authorization: "Bearer pivot-token", "content-type": "application/json" },
+    payload: body({ deviceMid: "mid-1" }),
+  });
+  assert.equal(unmapped.statusCode, 403);
 });
