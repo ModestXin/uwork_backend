@@ -83,6 +83,22 @@ Header `Idempotency-Key` 最长 128 字符；同键/同人/同内容且当前授
 
 跨企业或无权访问的 opaque ID 一律 404 且不泄露标题、作者、正文或附件名；未登录 401。查看只要求当前有效登录成员与 IP 规则，不要求模型席位，也不预留或扣减模型额度。
 
+## 手机远控（免扫码通路）
+
+企微内置浏览器从工作台进入时，不再靠扫桌面二维码拿配对材料，改为"设备目录 + 配对应答"：
+
+- `PUT /api/client/remote-devices/:sid`（桌面，Bearer）：登记设备存在 `{deviceMid,name?,platform?,ttlSeconds?}`（默认 120s，最大 600s，幂等心跳）。**不存任何密钥**。
+- `DELETE /api/client/remote-devices/:sid`：注销；同时作废该设备未完成的配对请求。
+- `GET /api/client/remote-devices`：只列本人 TTL 内设备，**不含密钥**；跨成员不可见。
+- `POST /api/client/remote-devices/:sid/pairings` → `{id,expiresAt}`（≤60s）；同一设备只保留一条待应答请求。
+- `GET /api/client/remote-devices/:sid/pairings/:id` → `pending | expired | answered`；`answered` 时返回 `{sid,hash,org,enterpriseAuth}` 并**立即消费**（一次性）。
+- `GET /api/client/remote-pairings/next?deviceSid=&wait=`（桌面，长轮询 ≤30s）→ 待应答请求或 `null`。
+- `POST /api/client/remote-pairings/:id/answer`（桌面）`{sid,hash}` → 材料只留在进程内 Map（TTL、一次性），不落库。
+
+准入这批只要求有效会话 + 席位 + IP 白名单（复用既有判定）；菜单开关、`remote` 渠道、审计与人工对账留下一批。relay/协议不变：手机拿到 `{sid,hash}` 后仍走既有 HMAC 连接与企业身份帧。
+
+企微网页授权：`POST /api/auth/wecom/attempts` 增加 `mode:"qr"|"web"`（默认 `qr`）。`web` 时授权链接为 OAuth2 网页授权（`scope=snsapi_base`、`redirect_uri=returnTo`），供企微内置浏览器免扫码登录；`returnTo` 只接受 HTTPS（本机回环 HTTP），扫码/回调/state 绑定与 `provider.identity` 复用既有实现。
+
 ## 企业客户端控制台
 
 `POST /api/client/menus/{id}/authorize` 返回 `{allowed,tenantId,menu?,version}`；只读取当前已发布且启用的项，关闭/缺失项不返回 URL，chat/agents 均按既有本地入口检查 local 助理渠道；兼容菜单 ID agents/assets 分别映射现有自动化/插件商店。菜单只控制入口，助理/资源策略仍裁决实际执行。

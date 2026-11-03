@@ -12,6 +12,7 @@ import { Gateway, gatewayRoutes } from "./gateway.js";
 import { assetRoutes } from "./assets.js";
 import { policyRoutes, ipAllowed } from "./policy.js";
 import { clientRoutes } from "./client.js";
+import { remoteRoutes } from "./remote.js";
 import { sharingRoutes, purgeExpiredShares } from "./sharing.js";
 import { sharingViewerRoutes } from "./sharing-viewer.js";
 import { clientConsoleRoutes } from "./client-console.js";
@@ -264,6 +265,7 @@ export async function createApp(options: AppOptions) {
   assetRoutes(app, db);
   policyRoutes(app, db);
   clientRoutes(app, db);
+  remoteRoutes(app, db, options.publicUrl);
   sharingRoutes(app, db, options.publicUrl);
   sharingViewerRoutes(app, db);
   purgeExpiredShares(db);

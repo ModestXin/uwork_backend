@@ -30,10 +30,16 @@ export function syntheticLogin(publicUrl: string): SyntheticLogin | undefined {
   return LOOPBACK_HOSTS.has(hostname) ? { email } : undefined;
 }
 
-export function syntheticAuthorizeUrl(publicUrl: string, state: string): string {
+export function syntheticAuthorizeUrl(
+  publicUrl: string,
+  state: string,
+  returnTo?: string,
+): string {
   const url = new URL(SYNTHETIC_AUTHORIZE_PATH, publicUrl);
   url.searchParams.set("state", state);
   url.searchParams.set("redirect_uri", `${publicUrl}/api/auth/wecom/callback`);
+  // 手机页（企微内置浏览器）申请 web 模式时，回调完成后再把 state/code 交回页面。
+  if (returnTo) url.searchParams.set("return_to", returnTo);
   return url.toString();
 }
 

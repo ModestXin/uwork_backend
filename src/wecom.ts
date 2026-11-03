@@ -160,6 +160,26 @@ export function createWecomProvider(
   };
 }
 export const wecomProvider: WecomProvider = createWecomProvider();
+/** 企微内置浏览器的回跳地址：HTTPS 任意域，或本机回环 HTTP；拒绝凭据与片段。 */
+function webReturnTo(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    fail(400, "INVALID_RETURN_TO", "回跳地址不合法");
+  }
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (
+    url.username ||
+    url.password ||
+    url.hash ||
+    !(url.protocol === "https:" || (url.protocol === "http:" && loopback))
+  )
+    fail(400, "INVALID_RETURN_TO", "回跳地址必须为 HTTPS（本机可回环）");
+  return url.toString();
+}
+
 export function wecomRoutes(
   app: FastifyInstance,
   db: Db,
@@ -217,7 +237,17 @@ export function wecomRoutes(
   });
   app.post("/api/auth/wecom/attempts", async (req, reply) => {
     rateLimit(db, `wecom:${req.ip}`, 30);
-    const { tenantId } = z.object({ tenantId: text }).strict().parse(req.body);
+    const { tenantId, mode, returnTo } = z
+      .object({
+        tenantId: text,
+        /** web = 企微内置浏览器内的网页授权（snsapi_base）；qr = 既有扫码登录页。 */
+        mode: z.enum(["qr", "web"]).default("qr"),
+        /** web 模式下授权完成后回到哪个页面（手机页自己）；缺省回到本后台回调页。 */
+        returnTo: z.string().max(2048).optional(),
+      })
+      .strict()
+      .parse(req.body);
+    const webReturnPath = mode === "web" ? webReturnTo(returnTo) : undefined;
     const configured = db.get<EnterpriseAuth>(
       "SELECT * FROM enterprise_auth WHERE tenant_id=?",
       tenantId,
@@ -239,7 +269,20 @@ export function wecomRoutes(
       now() + 5 * 60000,
     );
     let authorizeUrl: string;
-    if (configured) {
+    if (configured && mode === "web") {
+      // 企微内置浏览器用 OAuth2 网页授权：免扫码、静默拿 code，然后回跳到手机页自己换会话。
+      const url = new URL("https://open.weixin.qq.com/connect/oauth2/authorize");
+      for (const [k, v] of Object.entries({
+        appid: configured.corp_id,
+        redirect_uri: webReturnPath ?? `${publicUrl}/api/auth/wecom/callback`,
+        response_type: "code",
+        scope: "snsapi_base",
+        state,
+      }))
+        url.searchParams.set(k, v);
+      url.hash = "wechat_redirect";
+      authorizeUrl = url.toString();
+    } else if (configured) {
       const url = new URL("https://login.work.weixin.qq.com/wwlogin/sso/login");
       for (const [k, v] of Object.entries({
         appid: configured.corp_id,
@@ -253,7 +296,7 @@ export function wecomRoutes(
       authorizeUrl = url.toString();
     } else {
       // 合成授权页就在本机后台，真正换 code 的那一步被替换，其余流程不变。
-      authorizeUrl = syntheticAuthorizeUrl(publicUrl, state);
+      authorizeUrl = syntheticAuthorizeUrl(publicUrl, state, webReturnPath);
     }
     reply.code(201);
     return {
@@ -266,11 +309,16 @@ export function wecomRoutes(
   app.get("/api/auth/wecom/dev-synthetic", async (req, reply) => {
     if (!syntheticLogin(publicUrl)) fail(404, "NOT_FOUND", "请求无法处理");
     const query = z
-      .object({ state: z.string().min(1).max(200), redirect_uri: z.string().max(2048) })
+      .object({
+        state: z.string().min(1).max(200),
+        redirect_uri: z.string().max(2048),
+        return_to: z.string().max(2048).optional(),
+      })
       .strict()
       .parse(req.query);
     if (query.redirect_uri !== `${publicUrl}/api/auth/wecom/callback`)
       fail(400, "INVALID_REDIRECT", "授权回调地址不匹配");
+    const returnPath = webReturnTo(query.return_to);
     const attempt = db.get<{ id: string }>(
       "SELECT id FROM login_attempts WHERE state_hash=? AND status='pending' AND expires_at>?",
       hash(query.state),
@@ -280,6 +328,7 @@ export function wecomRoutes(
     const target = new URL(query.redirect_uri);
     target.searchParams.set("state", query.state);
     target.searchParams.set("code", SYNTHETIC_CODE);
+    if (returnPath) target.searchParams.set("return_to", returnPath);
     return reply.redirect(target.toString());
   });
   const verifyAttempt = async (query: { state: string; code: string }) => {
@@ -344,9 +393,19 @@ export function wecomRoutes(
       .object({
         state: z.string().min(1).max(200),
         code: z.string().min(1).max(1024),
+        /** 仅开发态合成登录使用：把 state/code 交回手机页。 */
+        return_to: z.string().max(2048).optional(),
       })
       .parse(req.query);
-    await verifyAttempt(query);
+    const returnPath = webReturnTo(query.return_to);
+    await verifyAttempt({ state: query.state, code: query.code });
+    if (returnPath) {
+      // 开发态合成登录：把 state/code 交回手机页，由页面完成 claim（真实 web 流程不经过这里）。
+      const target = new URL(returnPath);
+      target.searchParams.set("state", query.state);
+      target.searchParams.set("code", query.code);
+      return reply.redirect(target.toString());
+    }
     return reply
       .type("text/plain; charset=utf-8")
       .send("扫码验证完成，请返回 UWork。");

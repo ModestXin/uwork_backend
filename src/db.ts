@@ -131,12 +131,19 @@ export class Db {
       CREATE TABLE IF NOT EXISTS run_sandboxes(run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,runtime_id TEXT NOT NULL UNIQUE REFERENCES sandbox_runtimes(id));
       CREATE TABLE IF NOT EXISTS run_tools(run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,call_id TEXT NOT NULL,name TEXT NOT NULL,fingerprint TEXT NOT NULL,input TEXT NOT NULL,result TEXT,status TEXT NOT NULL,execution_id TEXT UNIQUE REFERENCES sandbox_executions(id) ON DELETE SET NULL,error_code TEXT,created_at INTEGER NOT NULL,finished_at INTEGER,PRIMARY KEY(run_id,call_id));
       CREATE TABLE IF NOT EXISTS run_connectors(run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,asset_id TEXT NOT NULL,asset_version INTEGER NOT NULL,PRIMARY KEY(run_id,asset_id));
+      CREATE TABLE IF NOT EXISTS remote_devices(tenant_id TEXT NOT NULL,user_id TEXT NOT NULL,device_sid TEXT NOT NULL,device_mid TEXT NOT NULL,name TEXT,platform TEXT,expires_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(tenant_id,device_sid));
+      CREATE INDEX IF NOT EXISTS remote_devices_user ON remote_devices(tenant_id,user_id,expires_at);
+      CREATE TABLE IF NOT EXISTS remote_pairings(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,user_id TEXT NOT NULL,device_sid TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,answered_at INTEGER);
+      CREATE INDEX IF NOT EXISTS remote_pairings_pending ON remote_pairings(tenant_id,user_id,device_sid,status,created_at);
       INSERT OR IGNORE INTO schema_version VALUES(1,unixepoch()*1000);
       INSERT OR IGNORE INTO schema_version VALUES(2,unixepoch()*1000);
     `);
         for (const statement of SHARING_SCHEMA) this.run(statement);
         this.run(
           "INSERT OR IGNORE INTO schema_version VALUES(6,unixepoch()*1000)",
+        );
+        this.run(
+          "INSERT OR IGNORE INTO schema_version VALUES(7,unixepoch()*1000)",
         );
         if (
           !this.all<{ name: string }>("PRAGMA table_info(runs)").some(
