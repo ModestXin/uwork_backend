@@ -75,6 +75,10 @@ test("desktop registers, heartbeats and unregisters a device without storing sec
     payload: body({ deviceMid: "mid-1", name: "办公室 Mac", platform: "darwin" }),
   });
   assert.equal(registered.statusCode, 200);
+  const registeredBody = registered.json() as { ok: boolean; tenantId?: string; memberId?: string };
+  // 桌面据此记住"我是谁"，手机身份帧要跟它比对。
+  assert.equal(registeredBody.memberId, f.owner.userId);
+  assert.equal(registeredBody.tenantId, f.owner.tenantId);
   const listed = await f.app.inject({
     method: "GET",
     url: "/api/client/remote-devices",
@@ -229,4 +233,39 @@ test("an unknown pivot token or an unmapped member is refused", async (t) => {
     payload: body({ deviceMid: "mid-1" }),
   });
   assert.equal(unmapped.statusCode, 403);
+});
+
+test("the identity endpoint answers member and tenant for both the phone and the pivot-bound desktop", async (t) => {
+  const f = await fixture(t, {
+    bindExternalId: "xiaohua.xin",
+    verifyExternalToken: async (token) =>
+      token === "pivot-token" ? { wecomUserId: "xiaohua.xin", orgId: "pivot-org" } : null,
+  });
+  const phone = await f.app.inject({
+    method: "GET",
+    url: "/api/client/remote-identity",
+    headers: auth(f.ownerToken),
+  });
+  assert.equal(phone.statusCode, 200);
+  assert.deepEqual(
+    { tenantId: (phone.json() as { tenantId: string }).tenantId, memberId: (phone.json() as { memberId: string }).memberId },
+    { tenantId: f.owner.tenantId, memberId: f.owner.userId },
+  );
+  const desktop = await f.app.inject({
+    method: "GET",
+    url: "/api/client/remote-identity",
+    headers: { authorization: "Bearer pivot-token" },
+  });
+  assert.equal(desktop.statusCode, 200);
+  // 两条通道最终落到同一个成员实体，"同一个人"是可判定的。
+  assert.deepEqual(
+    { tenantId: (desktop.json() as { tenantId: string }).tenantId, memberId: (desktop.json() as { memberId: string }).memberId },
+    { tenantId: (phone.json() as { tenantId: string }).tenantId, memberId: (phone.json() as { memberId: string }).memberId },
+  );
+  const other = await f.app.inject({
+    method: "GET",
+    url: "/api/client/remote-identity",
+    headers: { authorization: "Bearer nope" },
+  });
+  assert.equal(other.statusCode, 401);
 });
