@@ -13,6 +13,8 @@ const publicPaths = [
   "/api/auth/wecom/callback",
   // 本机开发态合成授权页：不鉴权（就是"扫码页"），但只在回环 + 显式 env 下存在。
   "/api/auth/wecom/dev-synthetic",
+  // 同源入口探测：公开只回 backend/tenantId（不含任何凭据），用于手机页与后台同源时定位组织。
+  "/api/auth/wecom/web-config",
   "/api/openapi.json",
 ];
 /** 权限判定写在被调用服务内部的端点。 */

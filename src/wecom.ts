@@ -180,12 +180,36 @@ function webReturnTo(raw: string | undefined): string | undefined {
   return url.toString();
 }
 
+/**
+ * 同源入口的组织解析（照 ucas-proxy 的口径）：显式映射优先，其次"唯一可登录租户"，
+ * 再其次"唯一租户"。解析不出来就返回 undefined，由调用方给出可读错误。
+ */
+function resolveTenantForRequest(
+  db: Db,
+  host: string | undefined,
+  tenantHosts: Record<string, string>,
+): string | undefined {
+  const normalized = host?.trim().toLowerCase();
+  if (normalized) {
+    const mapped = tenantHosts[normalized] ?? tenantHosts[normalized.split(":")[0]!];
+    if (mapped && db.get("SELECT id FROM tenants WHERE id=?", mapped)) return mapped;
+  }
+  const configured = db.all<{ tenant_id: string }>(
+    "SELECT tenant_id FROM enterprise_auth ORDER BY tenant_id",
+  );
+  if (configured.length === 1) return configured[0]!.tenant_id;
+  if (configured.length > 1) return undefined;
+  const tenants = db.all<{ id: string }>("SELECT id FROM tenants ORDER BY created_at");
+  return tenants.length === 1 ? tenants[0]!.id : undefined;
+}
+
 export function wecomRoutes(
   app: FastifyInstance,
   db: Db,
   vault: Vault,
   publicUrl: string,
   provider: WecomProvider = wecomProvider,
+  tenantHosts: Record<string, string> = {},
 ) {
   const configuration = (tenantId: string) => {
     const c = db.get<EnterpriseAuth>(
@@ -237,9 +261,10 @@ export function wecomRoutes(
   });
   app.post("/api/auth/wecom/attempts", async (req, reply) => {
     rateLimit(db, `wecom:${req.ip}`, 30);
-    const { tenantId, mode, returnTo } = z
+    const { tenantId: requestedTenantId, mode, returnTo } = z
       .object({
-        tenantId: text,
+        /** 省略时按请求 Host 解析（页面与后台同源的新入口不需要传组织）。 */
+        tenantId: text.optional(),
         /** web = 企微内置浏览器内的网页授权（snsapi_base）；qr = 既有扫码登录页。 */
         mode: z.enum(["qr", "web"]).default("qr"),
         /** web 模式下授权完成后回到哪个页面（手机页自己）；缺省回到本后台回调页。 */
@@ -248,6 +273,10 @@ export function wecomRoutes(
       .strict()
       .parse(req.body);
     const webReturnPath = mode === "web" ? webReturnTo(returnTo) : undefined;
+    const tenantId =
+      requestedTenantId ??
+      resolveTenantForRequest(db, req.headers.host, tenantHosts) ??
+      fail(400, "TENANT_REQUIRED", "无法确定组织，请指定 tenantId");
     const configured = db.get<EnterpriseAuth>(
       "SELECT * FROM enterprise_auth WHERE tenant_id=?",
       tenantId,
@@ -305,6 +334,21 @@ export function wecomRoutes(
       expiresAt: now() + 5 * 60000,
       authorizeUrl,
     };
+  });
+  /**
+   * 同源入口探测：手机页与后台同源时不再需要把 ``backend``/``org``/``enterprise_auth``
+   * 写进企微应用主页（照 ucas-proxy"页面与 API 同源、组织由 Host 解析"的口径）。
+   * 非本后端的 origin 直接 404，页面据此回落到二维码/参数入口。
+   */
+  app.get("/api/auth/wecom/web-config", async (req) => {
+    const tenantId = resolveTenantForRequest(db, req.headers.host, tenantHosts);
+    if (!tenantId) fail(404, "NOT_FOUND", "请求无法处理");
+    const configured = db.get<EnterpriseAuth>(
+      "SELECT * FROM enterprise_auth WHERE tenant_id=?",
+      tenantId,
+    );
+    if (!configured && !syntheticLogin(publicUrl)) fail(404, "NOT_FOUND", "请求无法处理");
+    return { backend: "uwork" as const, tenantId };
   });
   app.get("/api/auth/wecom/dev-synthetic", async (req, reply) => {
     if (!syntheticLogin(publicUrl)) fail(404, "NOT_FOUND", "请求无法处理");

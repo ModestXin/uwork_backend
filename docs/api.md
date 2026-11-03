@@ -97,6 +97,8 @@ Header `Idempotency-Key` 最长 128 字符；同键/同人/同内容且当前授
 
 准入这批只要求有效会话 + 席位 + IP 白名单（复用既有判定）；菜单开关、`remote` 渠道、审计与人工对账留下一批。relay/协议不变：手机拿到 `{sid,hash}` 后仍走既有 HMAC 连接与企业身份帧。
 
+同源入口：`GET /api/auth/wecom/web-config`（公开）按请求 Host 解析组织并回 `{backend:"uwork",tenantId}`，供手机页与后台同源时自动定位（企微应用主页不需要任何参数）；Host 映射用 `TENANT_HOSTS="host=tenantId,…"` 配置，解析顺序为映射 → 唯一已配置租户 → 唯一租户，解析不出就 404/400 `TENANT_REQUIRED`。`POST /api/auth/wecom/attempts` 的 `tenantId` 因此变为可选（省略时按同一规则解析）。
+
 企微网页授权：`POST /api/auth/wecom/attempts` 增加 `mode:"qr"|"web"`（默认 `qr`）。`web` 时授权链接为 OAuth2 网页授权（`scope=snsapi_base`、`redirect_uri=returnTo`），供企微内置浏览器免扫码登录；`returnTo` 只接受 HTTPS（本机回环 HTTP），扫码/回调/state 绑定与 `provider.identity` 复用既有实现。
 
 ## 企业客户端控制台

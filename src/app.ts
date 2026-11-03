@@ -46,6 +46,8 @@ export interface AppOptions {
   sandboxDriver?: SandboxDriver;
   sandboxSocket?: string;
   sandboxImage?: string;
+  /** host → tenantId（同源入口自动解析组织；缺省读环境变量）。 */
+  tenantHosts?: Record<string, string>;
 }
 export async function createApp(options: AppOptions) {
   if (options.masterKey.length !== 32)
@@ -280,7 +282,14 @@ export async function createApp(options: AppOptions) {
   );
   automationRoutes(app, db, runtime, vault);
   evaluationRoutes(app, db, runtime, vault, evaluation);
-  wecomRoutes(app, db, vault, options.publicUrl, options.wecomProvider);
+  wecomRoutes(
+    app,
+    db,
+    vault,
+    options.publicUrl,
+    options.wecomProvider,
+    options.tenantHosts ?? {},
+  );
   const retentionPorts = {
     purgeCalls: (tenant: string, before: number) =>
       gateway.purgeCalls(tenant, before),

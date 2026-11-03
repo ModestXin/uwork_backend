@@ -49,6 +49,11 @@ export function environment() {
           value.trim() ? value.split(",").map((entry) => entry.trim()) : [],
         )
         .pipe(privateModelOriginsSchema),
+      /**
+       * 组织路由（照 ucas-proxy 的 host → org 口径）：`host=tenantId` 逗号分隔，
+       * 形如 `uwork.ucas.com.cn=<id>,localhost:3210=<id>`；用于同源入口自动解析租户。
+       */
+      TENANT_HOSTS: z.string().max(4096).default(""),
       SANDBOX_DOCKER_SOCKET: z.string().max(512).optional(),
       SANDBOX_IMAGE: z.string().max(256).default("uwork-sandbox:local"),
     })
@@ -68,7 +73,24 @@ export function environment() {
     port: env.PORT,
     allowPrivateUpstreams: env.ALLOW_PRIVATE_UPSTREAMS === "true",
     privateModelOrigins: env.PRIVATE_MODEL_ORIGINS,
+    tenantHosts: parseTenantHosts(env.TENANT_HOSTS),
     sandboxSocket: env.SANDBOX_DOCKER_SOCKET,
     sandboxImage: env.SANDBOX_IMAGE,
   };
+}
+
+/** `host=tenantId` 列表；主机名小写、允许带端口（本机调试）。非法项直接忽略。 */
+export function parseTenantHosts(raw: string): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const entry of raw.split(",")) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const separator = trimmed.indexOf("=");
+    if (separator <= 0) continue;
+    const host = trimmed.slice(0, separator).trim().toLowerCase();
+    const tenantId = trimmed.slice(separator + 1).trim();
+    if (!host || !tenantId || host.includes("/")) continue;
+    map[host] = tenantId;
+  }
+  return map;
 }
