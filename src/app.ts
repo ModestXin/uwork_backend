@@ -50,6 +50,8 @@ export interface AppOptions {
   tenantHosts?: Record<string, string>;
   /** 桌面令牌（pivot 签发）内省；缺省由启动层按 PIVOT_API_URL 构造。 */
   verifyExternalToken?: (token: string) => Promise<{ wecomUserId: string; orgId: string } | null>;
+  /** 手机页登录用的 pivot 公开地址；留空则手机页继续用本后台自己的企微应用。 */
+  pivotPublicUrl?: string;
 }
 export async function createApp(options: AppOptions) {
   if (options.masterKey.length !== 32)
@@ -301,6 +303,7 @@ export async function createApp(options: AppOptions) {
     options.publicUrl,
     options.wecomProvider,
     options.tenantHosts ?? {},
+    options.pivotPublicUrl ?? "",
   );
   const retentionPorts = {
     purgeCalls: (tenant: string, before: number) =>

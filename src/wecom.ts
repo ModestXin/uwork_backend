@@ -210,6 +210,8 @@ export function wecomRoutes(
   publicUrl: string,
   provider: WecomProvider = wecomProvider,
   tenantHosts: Record<string, string> = {},
+  /** pivot 公开地址：配置后手机页的企微授权走 pivot（与桌面同一套身份）。 */
+  pivotPublicUrl = "",
 ) {
   const configuration = (tenantId: string) => {
     const c = db.get<EnterpriseAuth>(
@@ -348,7 +350,12 @@ export function wecomRoutes(
       tenantId,
     );
     if (!configured && !syntheticLogin(publicUrl)) fail(404, "NOT_FOUND", "请求无法处理");
-    return { backend: "uwork" as const, tenantId };
+    // pivot 有公开地址时，手机页登录走 pivot（同一套身份、同一套组织）；否则用本后台自己的企微应用。
+    return {
+      backend: "uwork" as const,
+      tenantId,
+      ...(pivotPublicUrl ? { pivotApiBaseUrl: pivotPublicUrl } : {}),
+    };
   });
   app.get("/api/auth/wecom/dev-synthetic", async (req, reply) => {
     if (!syntheticLogin(publicUrl)) fail(404, "NOT_FOUND", "请求无法处理");
