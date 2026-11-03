@@ -58,11 +58,7 @@ function assertRemoteAccess(db: Db, a: Actor, ip: string) {
 }
 
 /** 允许携带外部（pivot）令牌访问的路径；其余 /api/client/* 仍只认本后台会话。 */
-const EXTERNAL_TOKEN_PATHS = [
-  "/api/client/remote-devices",
-  "/api/client/remote-pairings",
-  "/api/client/remote-identity",
-] as const;
+const EXTERNAL_TOKEN_PATHS = ["/api/client/remote-devices", "/api/client/remote-pairings"] as const;
 
 export function isRemoteExternalPath(path: string): boolean {
   return EXTERNAL_TOKEN_PATHS.some(
@@ -219,8 +215,7 @@ export function remoteRoutes(app: FastifyInstance, db: Db, options: RemoteRoutes
       expiresAt,
       at,
     );
-    // 桌面据 memberId/tenantId 记住"我是谁"，用于校验手机身份帧（同人判定）。
-    return { ok: true, expiresAt, tenantId: a.tenantId, memberId: a.userId };
+    return { ok: true, expiresAt };
   });
 
   app.delete("/api/client/remote-devices/:sid", async (req) => {
@@ -249,29 +244,6 @@ export function remoteRoutes(app: FastifyInstance, db: Db, options: RemoteRoutes
       sid,
     );
     return { ok: true };
-  });
-
-  /**
-   * 手机身份帧校验：桌面拿手机令牌问"这是谁"，与本机登记的成员比对。
-   * 桌面自己走 pivot 内省，手机走本后台会话，两边最终都是 tenant + member 实体。
-   */
-  app.get("/api/client/remote-identity", async (req) => {
-    let a: Actor;
-    try {
-      a = authenticate(db, req);
-      requirePermission(a, "execute");
-    } catch (error) {
-      // 桌面登录在 pivot：令牌不属于本后台时回落内省（手机侧仍走本后台会话）。
-      if (!verifyExternalToken) throw error;
-      a = await pivotActor(req);
-    }
-    assertRemoteAccess(db, a, req.ip);
-    const user = db.get<{ name: string | null }>("SELECT name FROM users WHERE id=?", a.userId);
-    return {
-      tenantId: a.tenantId,
-      memberId: a.userId,
-      ...(user?.name ? { displayName: user.name } : {}),
-    };
   });
 
   app.get("/api/client/remote-devices", async (req) => {
